@@ -16,6 +16,7 @@ namespace Database
             : schema_(std::move(schema)), name_(std::move(name)), column_table_(std::move(column_table)), root_page_id_(root_page_id), oid_(oid)
         {
             // [系统级真列存集成点] 为这个表直接创建一个纯列态备用结构！
+            table_ = std::make_unique<ColumnarTable>(&schema_);
             columnar_storage_ = std::make_unique<ColumnarTable>(&schema_);
             stats_.tuple_count_ = 10000;
             stats_.page_count_ = 100;
