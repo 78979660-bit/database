@@ -1,7 +1,7 @@
 #pragma once
 
 #include "LogRecord.h"
-#include "../../Database/DiskManager.h"
+#include "../DiskManager.h"
 #include <mutex>
 #include <condition_variable>
 #include <thread>
