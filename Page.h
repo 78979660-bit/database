@@ -39,11 +39,23 @@ public:
     }
     ~Page()
     {
+        if (owns_data_ && data_ != nullptr)
+        {
+#ifdef _WIN32
+            _aligned_free(data_);
+#else
+            free(data_);
+#endif
+        }
         // 不再由 Page 自行销毁内存
     }
 
     /** @return 实际存储数据的字符数组指针 */
-    inline char *GetData() { return data_; }
+    inline char *GetData()
+    {
+        EnsureData();
+        return data_;
+    }
     inline const char *GetData() const { return data_; }
 
     /** @return 该页的页ID */
@@ -90,6 +102,7 @@ protected:
     // 实际存储数据的 4KB 数组
     // 动态分配，确保满足 Direct I/O 对齐要求
     char *data_ = nullptr;
+    bool owns_data_ = false;
 
     // [拆毁防线: 完全内存化的 Bw-Tree 架构] Deta Record 链表头指针
     // 所有更新 (Update/Insert) 将采用无锁 CAS 挂载 Delta 节点
@@ -116,9 +129,32 @@ protected:
     /** 将数据区域清零 */
     void ResetMemory()
     {
+        EnsureData();
         if (data_)
         {
             memset(data_, 0, PAGE_SIZE);
         }
+    }
+
+    void EnsureData()
+    {
+        if (data_ != nullptr)
+        {
+            return;
+        }
+#ifdef _WIN32
+        data_ = static_cast<char *>(_aligned_malloc(PAGE_SIZE, 4096));
+#else
+        if (posix_memalign(reinterpret_cast<void **>(&data_), 4096, PAGE_SIZE) != 0)
+        {
+            data_ = nullptr;
+        }
+#endif
+        if (data_ == nullptr)
+        {
+            throw std::bad_alloc();
+        }
+        owns_data_ = true;
+        memset(data_, 0, PAGE_SIZE);
     }
 };
