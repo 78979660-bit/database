@@ -328,7 +328,10 @@ namespace Database
         {
             if (!expr)
                 return true;
-            // Removed VARCHAR restriction to break bottleneck
+            if (auto const_expr = dynamic_cast<const ConstantValueExpression *>(expr))
+            {
+                return const_expr->GetValue().GetTypeId() != TypeId::VARCHAR;
+            }
             for (auto child : expr->GetChildren())
             {
                 if (!CanJitCompile(child.get()))
