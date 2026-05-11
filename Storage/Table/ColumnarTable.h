@@ -345,6 +345,7 @@ namespace Database
         void Reserve(size_t capacity)
         {
             std::lock_guard<std::mutex> lock(latch_);
+            rows_.reserve(capacity);
             for (auto &col : columns_)
             {
                 col.Reserve(capacity);
