@@ -6,6 +6,9 @@
 #include "../../Storage/Table/ColumnarTable.h"
 #include "../../Concurrency/Visibility.h"
 #include "../JIT/JitEngine.h"
+#include <algorithm>
+#include <cstring>
+#include <vector>
 
 namespace Database
 {
@@ -30,6 +33,7 @@ namespace Database
 
                 iter_ = metadata->columnar_storage_->MakeIterator();
                 columnar_table_ = metadata->columnar_storage_.get();
+                scan_row_ = 0;
             }
 
             const AbstractExpression *predicate = plan_->GetPredicate();
@@ -105,6 +109,10 @@ namespace Database
             const size_t batch_size = chunk.GetCapacity();
 
             const AbstractExpression *predicate = plan_->GetPredicate();
+            if (txn == nullptr && CanUseFastColumnarPath(chunk))
+            {
+                return NextFastColumnarBatch(chunk, predicate);
+            }
 
             auto end_iter = columnar_table_->MakeEofIterator();
             while (iter_ != end_iter)
@@ -215,6 +223,135 @@ namespace Database
         }
 
     private:
+        bool CanUseFastColumnarPath(Chunk &chunk)
+        {
+            const auto &schema = plan_->OutputSchema();
+            if (!schema)
+            {
+                return false;
+            }
+
+            for (size_t col_idx = 0; col_idx < schema->GetColumnCount(); ++col_idx)
+            {
+                if (schema->GetColumn(col_idx).GetType() != TypeId::INTEGER)
+                {
+                    return false;
+                }
+            }
+
+            if (chunk.GetColumnCount() == 0)
+            {
+                for (size_t col_idx = 0; col_idx < schema->GetColumnCount(); ++col_idx)
+                {
+                    chunk.AddVector(std::make_shared<FlatVector<int32_t>>(TypeId::INTEGER, chunk.GetCapacity()));
+                }
+            }
+            return chunk.GetColumnCount() == schema->GetColumnCount();
+        }
+
+        bool NextFastColumnarBatch(Chunk &chunk, const AbstractExpression *predicate)
+        {
+            const size_t batch_size = chunk.GetCapacity();
+            const size_t total_rows = columnar_table_->GetRowCount();
+            const size_t col_count = chunk.GetColumnCount();
+
+            if (cols_.size() != col_count)
+            {
+                cols_.assign(col_count, nullptr);
+                unpack_buffers_.assign(col_count, std::vector<int32_t>(batch_size));
+            }
+            for (auto &buffer : unpack_buffers_)
+            {
+                if (buffer.size() < batch_size)
+                {
+                    buffer.resize(batch_size);
+                }
+            }
+            if (results_.size() < batch_size)
+            {
+                results_.resize(batch_size);
+                nulls_.resize(batch_size);
+            }
+            if (!selection_vector_ || selection_capacity_ < batch_size)
+            {
+                selection_vector_ = std::make_shared<SelectionVector>(batch_size);
+                selection_capacity_ = batch_size;
+            }
+
+            while (scan_row_ < total_rows)
+            {
+                const size_t row_count = std::min(batch_size, total_rows - scan_row_);
+                chunk.Reset();
+
+                for (size_t col_idx = 0; col_idx < col_count; ++col_idx)
+                {
+                    auto flat_vec = std::static_pointer_cast<FlatVector<int32_t>>(chunk.GetVector(col_idx));
+                    int32_t *dest = flat_vec->Data();
+                    const int32_t *src = columnar_table_->UnpackColumnBatch(static_cast<uint32_t>(col_idx), scan_row_, row_count, unpack_buffers_[col_idx].data());
+                    if (src != dest)
+                    {
+                        std::memcpy(dest, src, row_count * sizeof(int32_t));
+                    }
+                    cols_[col_idx] = dest;
+                }
+
+                for (size_t i = 0; i < row_count; ++i)
+                {
+                    chunk.SetRID(i, RID(0, static_cast<uint32_t>(scan_row_ + i)));
+                }
+
+                scan_row_ += row_count;
+                chunk.SetCount(row_count);
+
+                if (predicate == nullptr)
+                {
+                    return true;
+                }
+
+                size_t matched_count = 0;
+                if (compiled_batch_func_)
+                {
+                    std::fill(nulls_.begin(), nulls_.begin() + row_count, 0);
+                    compiled_batch_func_(reinterpret_cast<const void **>(cols_.data()), results_.data(), nulls_.data(), row_count);
+
+                    for (size_t i = 0; i < row_count; ++i)
+                    {
+                        if (nulls_[i] == 0 && results_[i] != 0)
+                        {
+                            selection_vector_->SetIndex(matched_count++, i);
+                        }
+                    }
+                }
+                else
+                {
+                    if (!eval_result_ || eval_result_->GetCapacity() < batch_size)
+                    {
+                        eval_result_ = std::make_shared<FlatVector<int32_t>>(TypeId::INTEGER, batch_size);
+                        eval_vector_ = eval_result_;
+                    }
+                    predicate->Evaluate(chunk, eval_vector_);
+
+                    for (size_t i = 0; i < row_count; ++i)
+                    {
+                        Value val = eval_result_->GetValue(i);
+                        if (!val.IsNull() && val.GetAsInteger() != 0)
+                        {
+                            selection_vector_->SetIndex(matched_count++, i);
+                        }
+                    }
+                }
+
+                if (matched_count > 0)
+                {
+                    chunk.SetCount(matched_count);
+                    chunk.SetSelectionVector(selection_vector_);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         JitEngine jit_engine_;
         JitEngine::CompiledExpressionFunc compiled_func_{nullptr};
         JitEngine::CompiledBatchFunc compiled_batch_func_{nullptr};
@@ -222,6 +359,15 @@ namespace Database
         const SeqScanPlanNode *plan_;
         ColumnarTable::TableIterator iter_;
         ColumnarTable *columnar_table_ = nullptr;
+        size_t scan_row_ = 0;
+        size_t selection_capacity_ = 0;
+        std::vector<const int32_t *> cols_;
+        std::vector<std::vector<int32_t>> unpack_buffers_;
+        std::vector<int32_t> results_;
+        std::vector<uint8_t> nulls_;
+        std::shared_ptr<SelectionVector> selection_vector_;
+        std::shared_ptr<FlatVector<int32_t>> eval_result_;
+        std::shared_ptr<Vector> eval_vector_;
     };
 
 } // namespace Database
