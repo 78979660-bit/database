@@ -15,6 +15,7 @@ CMakeFiles/
 *.db
 *.log
 *.master
+*.bak
 gmon.out
 
 # CMake/Ninja generated files
@@ -24,6 +25,7 @@ cmake_install.cmake
 build.ninja
 .ninja_deps
 .ninja_log
+Testing/Temporary/
 
 # Local editor/system files
 .DS_Store
