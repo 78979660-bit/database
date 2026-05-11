@@ -96,6 +96,7 @@ namespace Database
         // null_bitmap: pointer to flat boolean output marking nulls
         // count: number of rows to process
         typedef void (*CompiledBatchFunc)(const void **cols, void *result, uint8_t *null_bitmap, uint32_t count);
+        typedef uint32_t (*CompiledBatchCountFunc)(const void **cols, uint32_t count);
 
         CompiledExpressionFunc CompileExpression(const AbstractExpression *expr)
         {
@@ -322,7 +323,114 @@ namespace Database
             return nullptr;
 #endif
                         }
+        CompiledBatchCountFunc CompileBatchCountExpression(const AbstractExpression *expr)
+        {
+#ifdef ENABLE_JIT
+            if (!expr || !CanJitCompile(expr))
+                return nullptr;
 
+            if (!module_)
+            {
+                module_ = std::make_unique<llvm::Module>("DatabaseBatchCountJIT", *context_);
+            }
+
+            llvm::Type *int32_type = llvm::Type::getInt32Ty(*context_);
+            llvm::Type *void_ptr_ptr_type = llvm::PointerType::getUnqual(*context_);
+
+            llvm::FunctionType *func_type = llvm::FunctionType::get(
+                int32_type,
+                {void_ptr_ptr_type, int32_type}, false);
+
+            llvm::Function *func = llvm::Function::Create(func_type, llvm::Function::ExternalLinkage, "count_batch_expr", module_.get());
+
+            auto arg_it = func->args().begin();
+            llvm::Value *cols_arg = arg_it++;
+            cols_arg->setName("cols");
+            llvm::Value *count_arg = arg_it++;
+            count_arg->setName("count");
+            func->addParamAttr(0, llvm::Attribute::NoAlias);
+
+            llvm::BasicBlock *entry_block = llvm::BasicBlock::Create(*context_, "entry", func);
+            llvm::BasicBlock *cond_block = llvm::BasicBlock::Create(*context_, "loop_cond", func);
+            llvm::BasicBlock *body_block = llvm::BasicBlock::Create(*context_, "loop_body", func);
+            llvm::BasicBlock *exit_block = llvm::BasicBlock::Create(*context_, "exit", func);
+
+            builder_->SetInsertPoint(entry_block);
+            builder_->CreateBr(cond_block);
+
+            builder_->SetInsertPoint(cond_block);
+            llvm::PHINode *i_phi = builder_->CreatePHI(int32_type, 2, "i");
+            i_phi->addIncoming(llvm::ConstantInt::get(int32_type, 0), entry_block);
+            llvm::PHINode *match_phi = builder_->CreatePHI(int32_type, 2, "matches");
+            match_phi->addIncoming(llvm::ConstantInt::get(int32_type, 0), entry_block);
+            llvm::Value *cmp = builder_->CreateICmpSLT(i_phi, count_arg, "cmp_count");
+            builder_->CreateCondBr(cmp, body_block, exit_block);
+
+            builder_->SetInsertPoint(body_block);
+            llvm::Value *next_i = nullptr;
+            llvm::Value *next_match = nullptr;
+            try
+            {
+                auto expr_res = GenerateBatchIR(expr, cols_arg, i_phi);
+                llvm::Value *not_null = builder_->CreateNot(expr_res.second, "not_null");
+                llvm::Value *non_zero = builder_->CreateICmpNE(expr_res.first, llvm::ConstantInt::get(int32_type, 0), "non_zero");
+                llvm::Value *is_match = builder_->CreateAnd(not_null, non_zero, "is_match");
+                llvm::Value *match_inc = builder_->CreateZExt(is_match, int32_type, "match_inc");
+                next_match = builder_->CreateAdd(match_phi, match_inc, "next_matches");
+                next_i = builder_->CreateAdd(i_phi, llvm::ConstantInt::get(int32_type, 1), "next_i");
+            }
+            catch (const std::exception &e)
+            {
+                return nullptr;
+            }
+            i_phi->addIncoming(next_i, body_block);
+            match_phi->addIncoming(next_match, body_block);
+            builder_->CreateBr(cond_block);
+
+            builder_->SetInsertPoint(exit_block);
+            builder_->CreateRet(match_phi);
+
+            llvm::LoopAnalysisManager LAM;
+            llvm::FunctionAnalysisManager FAM;
+            llvm::CGSCCAnalysisManager CGAM;
+            llvm::ModuleAnalysisManager MAM;
+
+            llvm::PassBuilder PB;
+            PB.registerModuleAnalyses(MAM);
+            PB.registerCGSCCAnalyses(CGAM);
+            PB.registerFunctionAnalyses(FAM);
+            PB.registerLoopAnalyses(LAM);
+            PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+            llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+            MPM.run(*module_, MAM);
+
+            llvm::StringMap<bool> host_features = llvm::sys::getHostCPUFeatures();
+            std::vector<std::string> feature_attrs;
+            for (auto &f : host_features)
+            {
+                feature_attrs.push_back(std::string(f.second ? "+" : "-") + f.first().str());
+            }
+
+            std::string err_str;
+            engines_.push_back(std::unique_ptr<llvm::ExecutionEngine>(llvm::EngineBuilder(std::move(module_))
+                                                                          .setErrorStr(&err_str)
+                                                                          .setEngineKind(llvm::EngineKind::JIT)
+                                                                          .setOptLevel(llvm::CodeGenOptLevel::Aggressive)
+                                                                          .setMCPU(llvm::sys::getHostCPUName().str())
+                                                                          .setMAttrs(feature_attrs)
+                                                                          .create()));
+
+            if (!engines_.back())
+                throw std::runtime_error("Failed to create Batch Count ExecutionEngine: " + err_str);
+
+            engines_.back()->finalizeObject();
+            void *func_ptr = engines_.back()->getPointerToFunction(func);
+            return reinterpret_cast<CompiledBatchCountFunc>(func_ptr);
+#else
+            return nullptr;
+#endif
+        }
     private:
         bool CanJitCompile(const AbstractExpression *expr) const
         {
@@ -677,8 +785,29 @@ namespace Database
                     res = builder_->CreateMul(lhs, rhs, "mul_res");
                     break;
                 case ArithType::Divide:
+                {
+                    // Branchless fast path for positive constant divisors.
+                    if (auto const_rhs = dynamic_cast<const ConstantValueExpression *>(arith_expr->GetChildAt(1))) {
+                        int32_t d = const_rhs->GetValue().GetAsInteger();
+                        if (d > 1) {
+                            uint32_t s = 0;
+                            while ((1ULL << s) < static_cast<uint32_t>(d))
+                                s++;
+                            uint32_t S = 32 + s;
+                            uint64_t M = ((1ULL << S) + d - 1) / d;
+
+                            llvm::Value *lhs_64 = builder_->CreateZExt(lhs, llvm::Type::getInt64Ty(*context_), "lhs_64");
+                            llvm::Value *magic_val = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), M);
+                            llvm::Value *mul_64 = builder_->CreateMul(lhs_64, magic_val, "magic_mul");
+                            llvm::Value *shift_val = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), S);
+                            llvm::Value *shr_64 = builder_->CreateLShr(mul_64, shift_val, "magic_shr");
+                            res = builder_->CreateTrunc(shr_64, llvm::Type::getInt32Ty(*context_), "div_res_magic");
+                            break;
+                        }
+                    }
                     res = builder_->CreateSDiv(lhs, rhs, "div_res");
                     break;
+                }
                         }
                         }
             return {res, any_null};
