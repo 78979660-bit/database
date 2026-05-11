@@ -1,5 +1,6 @@
 build/
 CMakeFiles/
+vtune-results/
 
 # Build outputs
 *.a
