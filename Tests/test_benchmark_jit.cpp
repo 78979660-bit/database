@@ -3,6 +3,8 @@
 #include <cassert>
 #include <memory>
 #include <chrono>
+#include <algorithm>
+#include <cstring>
 
 #include "BufferPoolManager.h"
 #include "DiskManager.h"
@@ -139,7 +141,6 @@ int main() {
         std::cout << "2. JIT Scalar (Row WITH JIT): \t" << time_jit_scalar << " ms" << std::endl;
 
         double time_vectorized = time_it([&]() {
-            ColumnarTable::TableIterator iter = table_info->table_->MakeIterator();
             size_t match = 0;
             const size_t batch_size = STANDARD_VECTOR_SIZE;
             Chunk chunk(batch_size);
@@ -147,16 +148,16 @@ int main() {
                 chunk.AddVector(std::make_shared<FlatVector<int32_t>>(TypeId::INTEGER, batch_size));
             }
 
-            while (iter != table_info->table_->MakeEofIterator()) {    
-                size_t row_count = 0;
+            const size_t total_rows = table_info->table_->GetRowCount();
+            std::vector<std::vector<int32_t>> buffers(schema.GetColumnCount(), std::vector<int32_t>(batch_size));
+
+            for (size_t current_idx = 0; current_idx < total_rows; current_idx += batch_size) {
+                size_t row_count = std::min(batch_size, total_rows - current_idx);
                 chunk.Reset();
-                while (iter != table_info->table_->MakeEofIterator() && row_count < batch_size) {
-                    for (size_t col_idx = 0; col_idx < schema.GetColumnCount(); ++col_idx) {
-                        Tuple t = *iter; Value val = t.GetValue(&schema, col_idx);
-                        chunk.GetVector(col_idx)->SetValue(row_count, val);     
-                    }
-                    row_count++;
-                    ++iter;
+                for (size_t col_idx = 0; col_idx < schema.GetColumnCount(); ++col_idx) {
+                    auto flat_vec = std::dynamic_pointer_cast<FlatVector<int32_t>>(chunk.GetVector(col_idx));
+                    const int32_t *src = table_info->table_->UnpackColumnBatch(col_idx, current_idx, row_count, buffers[col_idx].data());
+                    std::memcpy(flat_vec->Data(), src, row_count * sizeof(int32_t));
                 }
                 chunk.SetCount(row_count);
 
@@ -173,36 +174,21 @@ int main() {
         std::cout << "3. Vectorized (Chunk NO JIT): \t" << time_vectorized << " ms" << std::endl;
 
         double time_simd = time_it([&]() {
-            ColumnarTable::TableIterator iter = table_info->table_->MakeIterator();
             size_t match = 0;
             const size_t batch_size = STANDARD_VECTOR_SIZE;
-            Chunk chunk(batch_size);
-            for (uint32_t i = 0; i < schema.GetColumnCount(); ++i) {
-                chunk.AddVector(std::make_shared<FlatVector<int32_t>>(TypeId::INTEGER, batch_size));
-            }
-
+            const size_t total_rows = table_info->table_->GetRowCount();
             std::vector<const int32_t *> cols(schema.GetColumnCount());
             std::vector<int32_t> results(batch_size);
+            std::vector<uint8_t> nulls(batch_size, 0);
+            std::vector<std::vector<int32_t>> buffers(schema.GetColumnCount(), std::vector<int32_t>(batch_size));
 
-            while (iter != table_info->table_->MakeEofIterator()) {    
-                size_t row_count = 0;
-                chunk.Reset();
-                while (iter != table_info->table_->MakeEofIterator() && row_count < batch_size) {
-                    for (size_t col_idx = 0; col_idx < schema.GetColumnCount(); ++col_idx) {
-                        Tuple t = *iter; Value val = t.GetValue(&schema, col_idx);
-                        chunk.GetVector(col_idx)->SetValue(row_count, val);     
-                    }
-                    row_count++;
-                    ++iter;
-                }
-                chunk.SetCount(row_count);
-
+            for (size_t current_idx = 0; current_idx < total_rows; current_idx += batch_size) {
+                size_t row_count = std::min(batch_size, total_rows - current_idx);
                 for (size_t col_idx = 0; col_idx < schema.GetColumnCount(); ++col_idx) {
-                    auto flat_vec = std::dynamic_pointer_cast<FlatVector<int32_t>>(chunk.GetVector(col_idx));
-                    cols[col_idx] = flat_vec->Data();
+                    cols[col_idx] = table_info->table_->UnpackColumnBatch(col_idx, current_idx, row_count, buffers[col_idx].data());
                 }
 
-                std::vector<uint8_t> nulls(batch_size, 0);
+                std::fill(nulls.begin(), nulls.begin() + row_count, 0);
                 batch_func(reinterpret_cast<const void**>(cols.data()), results.data(), nulls.data(), row_count);
 
                 for (size_t i = 0; i < row_count; ++i) {
