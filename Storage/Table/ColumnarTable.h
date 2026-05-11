@@ -356,10 +356,12 @@ namespace Database
             std::lock_guard<std::mutex> lock(latch_);
 
             size_t current_row = num_rows_.load(std::memory_order_relaxed);
+            rows_.push_back(tuple);
             uint32_t col_count = schema_->GetColumnCount();
             for (uint32_t i = 0; i < col_count; ++i)
             {
-                int32_t raw_val = tuple.GetValue(schema_, i).GetAs<int32_t>();
+                Value value = tuple.GetValue(schema_, i);
+                int32_t raw_val = value.GetTypeId() == TypeId::INTEGER ? value.GetAs<int32_t>() : 0;
                 columns_[i].Append(raw_val, current_row);
             }
 
@@ -411,6 +413,12 @@ namespace Database
             uint32_t row_idx = rid.GetSlotId();
             if (row_idx >= num_rows_.load(std::memory_order_relaxed))
                 return false;
+            if (!rows_.empty())
+            {
+                *tuple = rows_[row_idx];
+                tuple->SetRID(rid);
+                return true;
+            }
 
             std::vector<Value> values;
             for (size_t i = 0; i < schema_->GetColumnCount(); ++i)
@@ -428,9 +436,15 @@ namespace Database
                 return false;
 
             std::lock_guard<std::mutex> lock(latch_);
+            if (row_idx < rows_.size())
+            {
+                rows_[row_idx] = tuple;
+            }
             for (size_t i = 0; i < schema_->GetColumnCount(); ++i)
             {
-                columns_[i].SetValue(row_idx, tuple.GetValue(schema_, i).GetAs<int32_t>());
+                Value value = tuple.GetValue(schema_, i);
+                int32_t raw_val = value.GetTypeId() == TypeId::INTEGER ? value.GetAs<int32_t>() : 0;
+                columns_[i].SetValue(row_idx, raw_val);
             }
             return true;
         }
@@ -482,6 +496,7 @@ namespace Database
     private:
         const Schema *schema_;
         std::vector<ColumnChunk> columns_;
+        std::vector<Tuple> rows_;
         std::atomic<size_t> num_rows_;
         std::mutex latch_;
     };
