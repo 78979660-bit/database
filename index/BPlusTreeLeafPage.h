@@ -8,7 +8,6 @@
 class BufferPoolManager;
 
 #define LEAF_PAGE_HEADER_SIZE 28
-#define LEAF_PAGE_KEY_VALUE_PAIR_SIZE (sizeof(KeyType) + sizeof(ValueType))
 
 /**
  * Store indexed key and record id(record id = page id slot id) - simplified to int
@@ -17,6 +16,7 @@ class BufferPoolManager;
  * | Header | Key(1) | Value(1) | Key(2) | Value(2) | ... | Key(n) | Value(n)
  *  ----------------------------------------------------------------------
  */
+template <typename KeyType, typename ValueType, typename KeyComparator>
 class BPlusTreeLeafPage : public BPlusTreePage
 {
 public:
@@ -43,6 +43,11 @@ public:
         return array_[index].second;
     }
 
+    const std::pair<KeyType, ValueType> &GetItem(int index) const
+    {
+        return array_[index];
+    }
+
     // Insert key & value pair (sorted)
     bool Insert(const KeyType &key, const ValueType &value, BufferPoolManager *bpm)
     {
@@ -53,7 +58,7 @@ public:
             return false; // Should split
         }
 
-        int index = lower_bound(key); // Assuming key unique
+        int index = lower_bound(key);
 
         // Shift elements
         for (int i = size; i > index; i--)
@@ -89,9 +94,52 @@ public:
         IncreaseSize(size);
     }
 
+    // Move all elements to recipient
+    void MoveAllTo(BPlusTreeLeafPage *recipient)
+    {
+        recipient->CopyNFrom(array_, GetSize());
+        recipient->SetNextPageId(GetNextPageId());
+        SetSize(0);
+    }
+
+    // Move first to end of recipient
+    void MoveFirstToEndOf(BPlusTreeLeafPage *recipient)
+    {
+        recipient->CopyLastFrom(array_[0]);
+        // Shift remaining
+        for (int i = 0; i < GetSize() - 1; i++)
+        {
+            array_[i] = array_[i + 1];
+        }
+        IncreaseSize(-1);
+    }
+
+    // Move last to front of recipient
+    void MoveLastToFrontOf(BPlusTreeLeafPage *recipient)
+    {
+        recipient->CopyFirstFrom(array_[GetSize() - 1]);
+        IncreaseSize(-1);
+    }
+
+    void CopyLastFrom(const std::pair<KeyType, ValueType> &item)
+    {
+        array_[GetSize()] = item;
+        IncreaseSize(1);
+    }
+
+    void CopyFirstFrom(const std::pair<KeyType, ValueType> &item)
+    {
+        for (int i = GetSize(); i > 0; i--)
+        {
+            array_[i] = array_[i - 1];
+        }
+        array_[0] = item;
+        IncreaseSize(1);
+    }
+
     int lower_bound(const KeyType &key) const
     {
-        // Linear scan
+        // Linear scan using operator>=
         for (int i = 0; i < GetSize(); i++)
         {
             if (array_[i].first >= key)
@@ -102,11 +150,37 @@ public:
         return GetSize();
     }
 
-    bool Lookup(const KeyType &key, ValueType &value, const KeyType &comparator) const
+    // Remove key & value pair with given key (return size after remove)
+    int RemoveAndDeleteRecord(const KeyType &key, const KeyComparator &comparator)
+    {
+        int index = KeyIndex(key, comparator);
+        if (index < GetSize() && comparator(array_[index].first, key) == 0)
+        {
+            for (int i = index; i < GetSize() - 1; ++i)
+            {
+                array_[i] = array_[i + 1];
+            }
+            IncreaseSize(-1);
+            return GetSize();
+        }
+        return GetSize();
+    }
+
+    int KeyIndex(const KeyType &key, const KeyComparator &comparator) const
     {
         for (int i = 0; i < GetSize(); i++)
         {
-            if (array_[i].first == key)
+            if (comparator(key, array_[i].first) == 0)
+                return i;
+        }
+        return GetSize();
+    }
+
+    bool Lookup(const KeyType &key, ValueType &value, const KeyComparator &comparator) const
+    {
+        for (int i = 0; i < GetSize(); i++)
+        {
+            if (comparator(key, array_[i].first) == 0)
             {
                 value = array_[i].second;
                 return true;

@@ -5,9 +5,9 @@
 #include <cstring>
 #include "../Page.h"
 
-// Define index keys and values for simplicity (int for now)
-using KeyType = int;
-using ValueType = int;
+// Remove hardcoded KeyType for Generic support
+// using KeyType = int;
+// using ValueType = int;
 #define INVALID_PAGE_ID -1
 
 enum class IndexPageType

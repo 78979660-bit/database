@@ -1,0 +1,30 @@
+build/
+CMakeFiles/
+
+# Build outputs
+*.a
+*.bin
+*.dll
+*.exe
+*.gch
+*.lib
+*.o
+*.obj
+
+# Generated database and logs
+*.db
+*.log
+*.master
+gmon.out
+
+# CMake/Ninja generated files
+CMakeCache.txt
+CTestTestfile.cmake
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Local editor/system files
+.DS_Store
+Thumbs.db

@@ -6,13 +6,13 @@
 #include "../BufferPoolManager.h"
 
 #define INTERNAL_PAGE_HEADER_SIZE 24
-#define INTERNAL_PAGE_KEY_VALUE_PAIR_SIZE (sizeof(KeyType) + sizeof(page_id_t))
 
 /**
  * Store n indexed keys and n+1 child pointers (page_id) within internal page.
  * Pointer(0) < Key(1) < Pointer(1) < Key(2) < Pointer(2) ... < Key(n) < Pointer(n)
  * NOTE: The first key is always invalid.
  */
+template <typename KeyType, typename ValueType, typename KeyComparator>
 class BPlusTreeInternalPage : public BPlusTreePage
 {
 public:
@@ -48,7 +48,7 @@ public:
 
     // Lookup the value for a given key, return the child page id
     // Finds the last key <= search_key
-    page_id_t Lookup(const KeyType &key, const KeyType &comparator) const
+    page_id_t Lookup(const KeyType &key, const KeyComparator &comparator) const
     {
         // Linear scan for simplicity (Binary search is better)
         for (int i = 1; i < GetSize(); i++)
@@ -97,22 +97,67 @@ public:
         return -1;
     }
 
+    // Move all elements to 'recipient' which is at right
+    void MoveAllTo(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BufferPoolManager *bpm)
+    {
+        SetKeyAt(0, middle_key);
+        recipient->CopyNFrom(array_, GetSize(), bpm);
+        SetSize(0);
+    }
+
+    void MoveFirstToEndOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BufferPoolManager *bpm)
+    {
+        SetKeyAt(0, middle_key);
+        recipient->CopyLastFrom(array_[0], bpm);
+
+        for (int i = 0; i < GetSize() - 1; i++)
+        {
+            array_[i] = array_[i + 1];
+        }
+        IncreaseSize(-1);
+    }
+
+    void MoveLastToFrontOf(BPlusTreeInternalPage *recipient, const KeyType &middle_key, BufferPoolManager *bpm)
+    {
+        recipient->SetKeyAt(0, middle_key);
+        recipient->CopyFirstFrom(array_[GetSize() - 1], bpm);
+        IncreaseSize(-1);
+    }
+
+    void CopyLastFrom(const std::pair<KeyType, page_id_t> &item, BufferPoolManager *bpm)
+    {
+        array_[GetSize()] = item;
+        IncreaseSize(1);
+
+        auto *child = bpm->FetchPage(item.second);
+        auto *node = reinterpret_cast<BPlusTreePage *>(child->GetData());
+        node->SetParentPageId(GetPageId());
+        bpm->UnpinPage(item.second, true);
+    }
+
+    void CopyFirstFrom(const std::pair<KeyType, page_id_t> &item, BufferPoolManager *bpm)
+    {
+        for (int i = GetSize(); i > 0; i--)
+        {
+            array_[i] = array_[i - 1];
+        }
+        array_[0] = item;
+        IncreaseSize(1);
+
+        auto *child = bpm->FetchPage(item.second);
+        auto *node = reinterpret_cast<BPlusTreePage *>(child->GetData());
+        node->SetParentPageId(GetPageId());
+        bpm->UnpinPage(item.second, true);
+    }
+
     // Move half of key & value pairs from current page to recipient page
     void MoveHalfTo(BPlusTreeInternalPage *recipient, BufferPoolManager *bpm)
     {
-        int start_idx = GetMinSize();
+        int start_idx = (GetSize() + 1) / 2; // Split point
         int original_size = GetSize();
-        // The middle key (array_[start_idx].first) moves UP to parent
-        // However, for implementation simplicity here, we copy first, then parent logic in InsertIntoParent handles the key.
-        // Wait, for internal node, the key at splitting point is pushed up.
-        // The children pointers after the split point move to the new page.
+        int move_count = original_size - start_idx;
 
-        // Correct logic:
-        // Key at `start_idx` moves up to parent.
-        // Pointers from `start_idx` (inclusive key, but logically key moves up) go to new page.
-        // But since this struct stores (Key, Value) pairs, let's just move the whole block first.
-
-        recipient->CopyNFrom(array_ + start_idx, original_size - start_idx, bpm);
+        recipient->CopyNFrom(array_ + start_idx, move_count, bpm);
         SetSize(start_idx);
     }
 
@@ -133,6 +178,16 @@ public:
             }
         }
         IncreaseSize(size);
+    }
+
+    // Remove the key & value pair in internal page according to input index(a.k.a array offset)
+    void Remove(int index)
+    {
+        for (int i = index; i < GetSize() - 1; ++i)
+        {
+            array_[i] = array_[i + 1];
+        }
+        IncreaseSize(-1);
     }
 
 private:

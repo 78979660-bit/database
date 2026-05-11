@@ -1,0 +1,49 @@
+#pragma once
+
+#include "AbstractExecutor.h"
+#include "../Plans/SeqScanPlanNode.h"
+#include "../../Storage/Table/TableHeap.h"
+
+namespace Database
+{
+
+    class SeqScanExecutor : public AbstractExecutor
+    {
+    public:
+        SeqScanExecutor(ExecutorContext *exec_ctx, const SeqScanPlanNode *plan)
+            : AbstractExecutor(exec_ctx), plan_(plan), iter_(nullptr, RID()) {}
+
+        void Init() override
+        {
+            std::string table_name = plan_->GetTableName();
+            TableMetadata *metadata = exec_ctx_->GetCatalog()->GetTable(table_name);
+            if (metadata)
+            {
+                // Need transaction
+                iter_ = metadata->table_->Begin(nullptr);
+                table_heap_ = metadata->table_.get();
+            }
+        }
+
+        bool Next(Tuple *tuple, RID *rid) override
+        {
+            if (!table_heap_)
+                return false;
+
+            if (iter_ != table_heap_->End())
+            {
+                *tuple = *iter_;
+                *rid = iter_.GetRID();
+                ++iter_;
+                return true;
+            }
+            return false;
+        }
+
+    private:
+        const SeqScanPlanNode *plan_;
+        TableIterator iter_;
+        TableHeap *table_heap_ = nullptr;
+    };
+
+} // namespace Database
