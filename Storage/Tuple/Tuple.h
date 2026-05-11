@@ -60,6 +60,20 @@ public:
             data_ptr_ = other.data_ptr_;
         }
     }
+
+    Tuple(Tuple &&other) noexcept
+        : data_(std::move(other.data_)),
+          data_ptr_(nullptr),
+          size_(other.size_),
+          allocated_(other.allocated_),
+          rid_(other.rid_),
+          meta_(other.meta_)
+    {
+        data_ptr_ = allocated_ ? data_.data() : other.data_ptr_;
+        other.data_ptr_ = nullptr;
+        other.size_ = 0;
+        other.allocated_ = false;
+    }
     
     // Assignment operator
     Tuple& operator=(const Tuple &other) {
@@ -75,6 +89,20 @@ public:
             data_ptr_ = other.data_ptr_;
             data_ = std::vector<char>(); // Force destruction instead of clear()
         }
+        return *this;
+    }
+
+    Tuple& operator=(Tuple &&other) noexcept {
+        if (this == &other) return *this;
+        data_ = std::move(other.data_);
+        size_ = other.size_;
+        allocated_ = other.allocated_;
+        rid_ = other.rid_;
+        meta_ = other.meta_;
+        data_ptr_ = allocated_ ? data_.data() : other.data_ptr_;
+        other.data_ptr_ = nullptr;
+        other.size_ = 0;
+        other.allocated_ = false;
         return *this;
     }
 
