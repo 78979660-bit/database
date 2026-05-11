@@ -11,7 +11,7 @@ namespace Database
 {
 
     // Define a standard chunk/batch size for the vectorized execution
-    constexpr size_t STANDARD_VECTOR_SIZE = 1024;
+    constexpr size_t STANDARD_VECTOR_SIZE = 4096;
 
     /**
      * @brief A Chunk (or RecordBatch) represents a set of column vectors housing a batch of rows.
@@ -71,8 +71,7 @@ namespace Database
         {
             count_ = 0;
             sel_vector_ = nullptr;
-            rids_.clear();
-            if (capacity_ > 0)
+            if (rids_.size() != capacity_)
             {
                 rids_.resize(capacity_);
             }
