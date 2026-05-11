@@ -7,7 +7,7 @@ namespace Database
 {
 
     using page_id_t = int32_t;
-    using slot_id_t = uint16_t;
+    using slot_id_t = uint32_t;
     using table_oid_t = uint32_t;
 
     class RID
@@ -49,7 +49,7 @@ namespace std
     {
         size_t operator()(const Database::RID &rid) const
         {
-            return hash<int32_t>()(rid.GetPageId()) ^ (hash<uint16_t>()(rid.GetSlotId()) << 1);
+            return hash<int32_t>()(rid.GetPageId()) ^ (hash<uint32_t>()(rid.GetSlotId()) << 1);
         }
     };
 }
