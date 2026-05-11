@@ -1,7 +1,7 @@
 #pragma once
 
 #include "LogManager.h"
-#include "../../Database/BufferPoolManager.h"
+#include "../BufferPoolManager.h"
 #include <unordered_map>
 #include <vector>
 
